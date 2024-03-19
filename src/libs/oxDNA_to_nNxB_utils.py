@@ -26,7 +26,7 @@ def oxDNA_to_nNxB(particles_per_course_bead, path_to_conf, path_to_top, path_to_
     Returns:
     - None, but prints the status of nNxB file creation and any issues encountered.
     """
-    monomer_id_info, positions = nucleotide_and_position_info(path_to_conf, path_to_top)
+    monomer_id_info, positions, ox_conf = nucleotide_and_position_info(path_to_conf, path_to_top)
     path_to_duplex_file, path_to_hb_file = run_oat_duplex_output_bonds(path_to_input, path_to_traj, n_cpus)
     print('Course-graining the particles')
     duplex_to_particle, particle_to_duplex = associate_particle_idx_to_unique_duiplex(path_to_duplex_file)
@@ -65,7 +65,7 @@ def nucleotide_and_position_info(path_to_conf, path_to_top):
     ox_conf = inbox(ox_conf, center=True)
     positions = ox_conf.positions
     
-    return monomer_id_info, positions
+    return monomer_id_info, positions, ox_conf
 
 
 def run_oat_duplex_output_bonds(path_to_input, path_to_traj, n_cpus):
@@ -600,7 +600,7 @@ def write_strand_info(course_particle_strands, coarse_particles_nucleotides, key
 
     # Reverse the order of the groups to put them back in 3` to 5` order
     for idx in range(num_course_duplex):
-        ordered_nucs[(idx+1,1)] = coarse_particles_nucleotides[(idx+1,1)][::-1]
+        ordered_nucs[(idx+1,1)] = ordered_nucs[(idx+1,1)][::-1]
     
     sort_particles_based_on_strand = {}
     
@@ -634,32 +634,34 @@ def write_strand_info(course_particle_strands, coarse_particles_nucleotides, key
     with open(f'{system_name}_{particles_per_course_bead}_nuc_beads_strands_list.txt', 'w') as f:
         f.write(f'{five_to_three_formatted_list}')
     
-    return formatted_list
+    return five_to_three_formatted_list
 
 def write_course_particle_nucleotides(coarse_particles_nucleotides, coarse_particle_indexes, keys_ordered_acending, system_name, particles_per_course_bead):
     ordered_nucs = deepcopy(coarse_particles_nucleotides)
     
     # Reverse the nucleotides in each group to put the nucleotides back
-    # in 3` to 5` order after I reversed them in d_to_p
+    # in 5` to 3` order after I reversed them in d_to_p
     course_keys = list(coarse_particles_nucleotides.keys())
     num_course_duplex = len([key for key in course_keys if key[1] == 1])
     
     for idx in range(num_course_duplex):
-        for lists in range(len(coarse_particles_nucleotides[(idx+1,1)])):
-            ordered_nucs[(idx+1,1)][lists] = coarse_particles_nucleotides[(idx+1,1)][lists][::-1]
+        for lists in range(len(coarse_particles_nucleotides[(idx+1,0)])):
+            ordered_nucs[(idx+1,0)][lists] = coarse_particles_nucleotides[(idx+1,0)][lists][::-1]
 
-    # Reverse the order of the groups to put them back in 3` to 5` order
+    # Reverse the order of the groups to put them back in 5` to 3` order
     for idx in range(num_course_duplex):
-        ordered_nucs[(idx+1,1)] = coarse_particles_nucleotides[(idx+1,1)][::-1]
+        ordered_nucs[(idx+1,0)] = ordered_nucs[(idx+1,0)][::-1]
 
     # Order the groups by acending particle index
     coarse_particles_nucleotides_ordered = [ordered_nucs[order] for order in keys_ordered_acending]   
-    
+    coarse_particles_nucleotides_ordered = coarse_particles_nucleotides_ordered[::-1] # Reverse the order of the groups to put them back in 5` to 3` order
     nuc_beads_dic = []
     
     for lists in coarse_particles_nucleotides_ordered:
         for string in lists:
-            nuc_beads_dic.append(string)
+            nuc_beads_dic.append(string) # Reverse the order of the groups to put them back in 5` to 3` order
+    # nuc_beads_dic = nuc_beads_dic[::-1]
+    
     nuc_beads_dic = {f'{key}':string for key, string in enumerate(nuc_beads_dic)}
 
     with open(f'{system_name}_{particles_per_course_bead}_nuc_beads_sequence.txt', 'w') as f:
@@ -677,7 +679,10 @@ def write_course_particles_positions(coarse_particles_positions, keys_ordered_ac
     for idx in range(num_course_duplex):
         ordered_positions[(idx+1,1)] = coarse_particles_positions[(idx+1,1)][::-1]
 
-    coarse_particles_positions_ordered = [ordered_positions[order] for order in keys_ordered_acending]    
+
+    # I think this will correctly order the postions in 5` to 3` order, however I need to test it but am yet to create a means to test it.
+    coarse_particles_positions_ordered = [ordered_positions[order][::-1] for order in keys_ordered_acending]    
+    coarse_particles_positions_ordered = coarse_particles_positions_ordered[::-1] # Reverse the order of the groups to put them back in 5` to 3` order
     
     with open(f'{system_name}_{particles_per_course_bead}_nuc_beads_positions.xyz', 'w') as file:
         for bead_positions in coarse_particles_positions_ordered:
@@ -726,14 +731,14 @@ def write_course_particle_bonded_pairs(coarse_particle_indexes, coarse_particles
     
     dict_keys = list(ordered_indexes.keys())
     dict_values = list(ordered_indexes.values())
-    
+    dict_values = dict_values[::-1] # Reverse the order of the groups to put them back in 5` to 3` order
     # print(ordered_indexes)
     
     course_bead_idx_pair_dict = {}
     i = 0
     for beads in particles_idx_pair_dict.values():
         try:
-            course_bead_idx_pair_dict[i] = (dict_values.index(beads[0]), dict_values.index(beads[1]))
+            course_bead_idx_pair_dict[i] = (dict_values.index(beads[1]), dict_values.index(beads[0]))
         except:
             course_bead_idx_pair_dict[i] = (dict_values.index(beads[0]),)
         i +=1
