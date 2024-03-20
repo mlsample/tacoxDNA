@@ -18,6 +18,7 @@ def cli_parser(prog="oxDNA_to_nNxB.py"):
     parser.add_argument('-p', metavar='num_cpus', nargs=1, type=int, dest='parallel', help="(optional) How many cores to use")
     parser.add_argument('-o', '--output', metavar='output_file', nargs=1, help='The filename to save the mean structure to')
     parser.add_argument('-r', metavar='remainder_modifier', nargs=1, type=float, dest='remainder_modifier', help="If particles_per_course_bead * remainder_modifier <= num_particle_to_bead_remainder append remainder to previous bead")
+    parser.add_argument('-f', '--force_stiff', metavar='force_stiff', nargs=1, type=float, dest='force_stiff', help="Stiffness (k value) of the force between bonded particles in oxDNA units")
 
     return parser
 
@@ -38,9 +39,10 @@ def main():
     material = args.material[0]
     
     n_cpus = args.parallel[0] if args.parallel else 1
-    remainder_modifier = args.remainder_modifier[0] if args.remainder_modifier else 0.25
-    system_name = args.output[0] if args.output else None
-    
+    remainder_modifier = args.remainder_modifier[0] if args.remainder_modifier else 0.34
+    force_stiff = args.force_stiff[0] if args.force_stiff else 3
+
+    system_name = args.output[0] if args.output else path_to_conf.split('/')[-1].split('.')[0]
 
     oxDNA_to_nNxB(particles_per_course_bead,
                   path_to_conf,
@@ -49,8 +51,9 @@ def main():
                   path_to_traj,
                   material,
                   remainder_modifier,
-                  n_cpus=n_cpus,
-                  system_name=system_name)
+                  force_stiff,
+                  system_name,
+                  n_cpus=n_cpus)
     
 if __name__ == "__main__":
     main()

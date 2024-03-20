@@ -9,54 +9,85 @@ import json as js
 import sys
 from contextlib import contextmanager
 from scipy import stats
+from collections import Counter
 
-def oxDNA_to_nNxB(particles_per_course_bead, path_to_conf, path_to_top, path_to_input, path_to_traj, material, remainder_modifer, n_cpus=1, system_name=None):
-    """
-    Converts oxDNA simulation output to nNxB format for coarse-grained analysis.
+def oxDNA_to_nNxB(
+    particles_per_course_bead: int, path_to_conf: str, path_to_top: str, path_to_input: str,
+    path_to_traj: str, material: str, remainder_modifer: float, force_stiff: float, system_name: str, n_cpus=1
+    ):
+    """Converts oxDNA simulation output to nNxB format for coarse-grained analysis.
 
-    Parameters:
-    - particles_per_course_bead (int): Number of particles per coarse-grained bead.
-    - path_to_conf (str): Path to the configuration file.
-    - path_to_top (str): Path to the topology file.
-    - path_to_input (str): Path to the input file for oxDNA.
-    - path_to_traj (str): Path to the trajectory file from oxDNA simulation.
-    - n_cpus (int): Number of CPUs to use for parallel processing (default: 1).
-    - system_name (str): Name of the system for output files (default: None).
+    Args:
+        particles_per_course_bead (int): Number of particles per coarse-grained bead.
+        path_to_conf (str): Path to the configuration file.
+        path_to_top (str): Path to the topology file.
+        path_to_input (str): Path to the input file for oxDNA.
+        path_to_traj (str): Path to the trajectory file from oxDNA simulation.
+        n_cpus (int): Number of CPUs to use for parallel processing (default: 1).
+        system_name (str): Name of the system for output files (default: None).
 
     Returns:
-    - None, but prints the status of nNxB file creation and any issues encountered.
+        None, but prints the status of nNxB file creation and any issues encountered.
     """
+    
+    # Extract nucleotide and position information from configuration and topology files
     monomer_id_info, positions, ox_conf = nucleotide_and_position_info(path_to_conf, path_to_top)
+    # Run the duplex finder and output bonds analysis using oxDNA Analysis Tools
     path_to_duplex_file, path_to_hb_file = run_oat_duplex_output_bonds(path_to_input, path_to_traj, n_cpus)
+    
     print('Course-graining the particles')
+    # Use the duplex finder output to create a mapping from duplexes to particles
     duplex_to_particle, particle_to_duplex = associate_particle_idx_to_unique_duiplex(path_to_duplex_file)
+    # Run error correction for the duplex finder by handling edge cases and non-bonded fixes
     duplex_to_particle, all_edge_cases = run_duplex_finder_error_correction(duplex_to_particle, particle_to_duplex, monomer_id_info, positions, path_to_hb_file)
-
-    if system_name is None:
-        system_name = path_to_conf.split('/')[-1].split('.')[0]
-        
+    
+    # Create coarse-grained particle information formated as unordered dicts
     coarse_particles_positions, coarse_particles_nucleotides, coarse_particle_indexes, course_particle_strands = create_coarse_particle_info(
        duplex_to_particle, positions, particles_per_course_bead, monomer_id_info, remainder_modifer=remainder_modifer 
     )
+    # Write the coarse-grained particle information to nNxB files
     coarse_particles_nucleotides_ordered, coarse_particles_positions_ordered, bead_pair_dict, coarse_particle_indexes_ordered, formatted_strand_list = write_course_particle_files_functional(
-       coarse_particles_nucleotides, coarse_particles_positions, coarse_particle_indexes, course_particle_strands, system_name, particles_per_course_bead, material
+       coarse_particles_nucleotides, coarse_particles_positions, coarse_particle_indexes, course_particle_strands, system_name, particles_per_course_bead, material, ox_conf, force_stiff
     )
+    
+    print_results(all_edge_cases, ox_conf, coarse_particle_indexes_ordered)
+    
+    return None
+    
+
+def print_results(all_edge_cases, ox_conf, coarse_particle_indexes_ordered):
     if all_edge_cases:
-        return print('Able to create nNxB files, but unable to assign all nucleotides to duplexes.')
+        print('Able to create nNxB files, but unable to assign all nucleotides to duplexes.')
     else:
-        return print('nNxB files created successfully.')
+        print('nNxB files created successfully.')
+    flat_edge_cases = [item for sublist in all_edge_cases for item in sublist]
+
+    n_starting_particles = ox_conf.positions.shape[0]
+    flat_indexes = [item for sublist in coarse_particle_indexes_ordered.values() for item in sublist]
+    n_course_particles = len(flat_indexes)
+    n_particles_for_each_bead = [len(value) for value in flat_indexes]
+    unique_particles_per_bead = set(n_particles_for_each_bead)
+    particle_per_bead_statistic = {value: n_particles_for_each_bead.count(value) for value in unique_particles_per_bead}
+    
+    print(f'\nConversion statistics:\n')
+    print(f'Percentage of particles included in nNxB file: {(1 - (len(flat_edge_cases)/n_starting_particles))*100:.2f}%')
+    print(f'Original particles: {n_starting_particles}, Course particles: {n_course_particles}, Compression factor: {n_starting_particles/n_course_particles:.2f} particles per bead')
+    print('Percent of course beads with N particles:')
+    for key, value in particle_per_bead_statistic.items():
+        print(f' {key} = {value / n_course_particles * 100:.2f}%')
 
     
-def nucleotide_and_position_info(path_to_conf, path_to_top):
-    """
-    Extracts nucleotide and position information from configuration and topology files.
+def nucleotide_and_position_info(
+    path_to_conf: str, path_to_top: str
+    ):
+    """Extracts nucleotide and position information from configuration and topology files.
 
-    Parameters:
-    - path_to_conf: Path to the configuration file.
-    - path_to_top: Path to the topology file.
+    Args:
+        path_to_conf (str): Path to the configuration file.
+        path_to_top (str): Path to the topology file.
 
     Returns:
-    - Tuple containing monomer ID information and positions.
+        Tuple containing monomer ID information and positions.
     """
     top_info, traj_info = describe(None, path_to_conf)
     system, monomer_id_info = strand_describe(path_to_top)
@@ -68,14 +99,15 @@ def nucleotide_and_position_info(path_to_conf, path_to_top):
     return monomer_id_info, positions, ox_conf
 
 
-def run_oat_duplex_output_bonds(path_to_input, path_to_traj, n_cpus):
-    """
-    Runs the duplex finder and output bonds analysis using oxDNA Analysis Tools.
+def run_oat_duplex_output_bonds(
+    path_to_input: str, path_to_traj: str, n_cpus: int
+    ):
+    """Runs the duplex finder and output bonds analysis using oxDNA Analysis Tools.
 
     Parameters:
-    - path_to_input: Path to the input file for oxDNA.
-    - path_to_traj: Path to the trajectory file from oxDNA simulation.
-    - n_cpus: Number of CPUs to use for parallel processing.
+        path_to_input (str): Path to the input file for oxDNA.
+        path_to_traj (str): Path to the trajectory file from oxDNA simulation.
+        n_cpus (str): Number of CPUs to use for parallel processing.
 
     Returns:
     - Paths to the duplex info file and hydrogen bonds info file.
@@ -87,7 +119,20 @@ def run_oat_duplex_output_bonds(path_to_input, path_to_traj, n_cpus):
     return path_to_duplex_file, path_to_hb_file 
 
 
-def create_duplex_info_file(abs_path_to_files, input_file_name, conf_file_name, n_cpus=1):
+def create_duplex_info_file(
+    abs_path_to_files: str, input_file_name:str, conf_file_name:str, n_cpus=1
+    ):
+    """Creates a duplex info file using the duplex finder from oxDNA Analysis Tools.
+
+    Args:
+        abs_path_to_files (str): Absolute path to the directory containing the input and trajectory files.
+        input_file_name (str): Name of the input file.
+        conf_file_name (str): Name of the conformation file.
+        n_cpus (int, optional): Numeber of CPUs to use. Defaults to 1.
+
+    Returns:
+        path_to_duplex_info_file (str): Path to duplex info file
+    """
     print('Creating duplex info file')
     chdir(abs_path_to_files)
     argv.clear()
@@ -97,7 +142,20 @@ def create_duplex_info_file(abs_path_to_files, input_file_name, conf_file_name, 
     return path_to_duplex_info_file
 
 
-def create_output_bonds_info_file(abs_path_to_files, input_file_name, conf_file_name, n_cpus=1):
+def create_output_bonds_info_file(
+    abs_path_to_files: str, input_file_name: str, conf_file_name: str, n_cpus=1
+    ):
+    """Create a hydrogen bonds info file using the output bonds analysis from oxDNA Analysis Tools.
+
+    Args:
+        abs_path_to_files (str): Absolute path to the directory containing the input and trajectory files.
+        input_file_name (str): Input file name.
+        conf_file_name (str): Conformation file name.
+        n_cpus (int, optional): Number of CPUs to use. Defaults to 1.
+
+    Returns:
+        path_to_hb_info_file (str): Path to hydrogen bonds info file.
+    """
     print('Creating hydrogen bonds info file')
     chdir(abs_path_to_files)
     argv.clear()
@@ -106,50 +164,67 @@ def create_output_bonds_info_file(abs_path_to_files, input_file_name, conf_file_
     path_to_hb_info_file = path.join(abs_path_to_files, 'bonds_HB.json')
     return path_to_hb_info_file
 
-def read_hb_energy_file(path_to_hb_energy_file):
+def read_hb_energy_file(
+    path_to_hb_energy_file: str
+    ):
+    """Read the hb energy file and return the data as a dictionary.
+
+    Args:
+        path_to_hb_energy_file (str): Path to the hydrogen bond energy file.
+
+    Returns:
+        hb_energy (dict): Dict containing the hydrogen bond energy data for each nucleotide.
+    """
     with open(path_to_hb_energy_file, 'r') as f:
         hb_energy = js.load(f)
     return hb_energy
 
-def associate_particle_idx_to_unique_duiplex(path_to_duplex_info:str) -> dict:
-    """
-    Returns: Dictonary with duplex id as key, and as values we have a list of 2 lists where the first
-    list is the particle idxes of the duplex in 3` -> 5` and 2nd list is particle idex in 5` -> 3`
-    """
+def associate_particle_idx_to_unique_duiplex(
+    path_to_duplex_info: str
+    ):
+    """Map the particle indices to unique duplexes using the duplex info file.
 
+    Args:
+        path_to_duplex_info (str): Absolute path to the duplex info file.
+
+    Returns:
+        d_to_p (dict): Dictonary with duplex id as key, and as values we have a list of 2 lists where the first
+                list is the particle idxes of the duplex in 3` -> 5` and 2nd list is particle idex in 5` -> 3`
+        p_to_d (dict): Dictionary with particle idx as key and duplex id as value.
+    """
     with open(path_to_duplex_info, 'r') as f:
         duplex_ends = f.readlines()
 
-    n_conf = duplex_ends[-1].split('\t')[0]
+    n_conf = int(duplex_ends[-1].split('\t')[0])
     d1_ends = {}
     d2_ends = {}
-    for conf in range(0, int(n_conf)+1):
-        d1_ends[conf] = [list(map(int, d.split('\t')[2:4])) for d in duplex_ends[1:] if int(d.split('\t')[0]) == conf]
-        d2_ends[conf] = [list(map(int, d.split('\t')[4:6])) for d in duplex_ends[1:] if int(d.split('\t')[0]) == conf]
-
-    d1s_range = {k:[list(range(d[0], d[1]+1)) for d in val] for k, val in d1_ends.items()}
-    d2s_range = {k:[list(range(d[0], d[1]+1)) for d in val] for k, val in d2_ends.items()}
-
-    d1_most_nucs = {k:len(np.concatenate(vals)) for k, vals in d1s_range.items()}
-    d2_most_nucs = {k:len(np.concatenate(vals)) for k, vals in d2s_range.items()}
     
-    d1_m = list(d1_most_nucs.values())
-    d2_m = list(d2_most_nucs.values())
+    split_lines = [line.split('\t') for line in duplex_ends[1:]]
+    conf_split = np.array([ends[0] for ends in split_lines], dtype=int)
+    d1_split = np.array([ends[2:4] for ends in split_lines], dtype=int)
+    d2_split = np.array([ends[4:6] for ends in split_lines], dtype=int)
 
-    d1_argmax = np.argmax(d1_m)
-    d2_argmax = np.argmax(d2_m)
-    d1_max = np.max(d1_m)
-    d2_max = np.max(d2_m)
+    # make a dict called d1_ends with the conf as the key de
+    d1_ends = split_by_conf(conf_split, d1_split)
+    d2_ends = split_by_conf(conf_split, d2_split)
+    
+    d1_most_nucs = [np.sum(d[:, 1] - d[:, 0] + 1) for d in d1_ends]
+    d2_most_nucs = [np.sum(d[:, 1] - d[:, 0] + 1) for d in d2_ends]
+    
+    d1_argmax = np.argmax(d1_most_nucs)
+    d2_argmax = np.argmax(d2_most_nucs)
+    
     if d1_argmax == d2_argmax:
-        d1s = d1s_range[d1_argmax]
-        d2s = d2s_range[d2_argmax]
+        d1_argmax_ends = d1_ends[d1_argmax]
+        d2_argmax_ends = d2_ends[d2_argmax]
     else:
-        d1s = d1s_range[d1_argmax]
-        d2s = d2s_range[d1_argmax]
+        d1_argmax_ends = d1_ends[d1_argmax]
+        d2_argmax_ends = d2_ends[d1_argmax]
+    
+    d1s = [np.arange(d1[0], d1[1]+1) for d1 in d1_argmax_ends]
+    d2s = [np.arange(d2[0], d2[1]+1) for d2 in d2_argmax_ends]
+    
 
-    # else:
-    #     d1s = d1s_range[d2_argmax]
-    #     d2s = d2s_range[d2_argmax]
 
     p_to_d = {}
     for i, (d1, d2) in enumerate(zip(d1s, d2s)):
@@ -158,14 +233,13 @@ def associate_particle_idx_to_unique_duiplex(path_to_duplex_info:str) -> dict:
         for p in d2:
             p_to_d[p] = -(i+1)
 
-    d_to_p = {duplex: [[],[]] for duplex in range(1, len(d1s)+1,)}
+    # d_to_p = {duplex: [[],[]] for duplex in range(1, len(d1s)+1,)}
+    d_to_p = {}
+    for duplex, (d1, d2) in enumerate(zip(d1s, d2s), start=1):
+        d_to_p[duplex] = []
+        d_to_p[duplex].append(d1.tolist())
+        d_to_p[duplex].append(d2.tolist()) 
 
-    # d_to_p
-    for particle, duplex in p_to_d.items():
-        if duplex > 0:
-            d_to_p[duplex][0].append(particle)
-        elif duplex < 0:
-            d_to_p[abs(duplex)][1].append(particle)
 
     # Now d_to_p will contain lists of particles for each duplex
     for duplex, strands in d_to_p.items():
@@ -174,19 +248,33 @@ def associate_particle_idx_to_unique_duiplex(path_to_duplex_info:str) -> dict:
     return d_to_p, p_to_d
 
 
-def run_duplex_finder_error_correction(duplex_to_particle, particle_to_duplex, nucleotides_in_duplex, positions, path_to_hb_file):
-    """
-    Runs error correction for the duplex finder by handling edge cases and non-bonded fixes.
+def split_by_conf(conf_split, d1_splits):
+    # Find the indices where the value changes in conf_split
+    change_indices = np.where(np.diff(conf_split) != 0)[0] + 1
 
-    Parameters:
-    - duplex_to_particle (dict): Mapping from duplexes to particles.
-    - particle_to_duplex (dict): Mapping from particles to duplexes.
-    - nucleotides_in_duplex: Information about nucleotides in each duplex.
-    - positions (np.array): Positions of particles.
-    - path_to_hb_file (str): Path to the hydrogen bond information file.
+    # Compute the counts of each consecutive integer
+    counts = np.diff(np.append(0, change_indices))
+
+    # Split d1_splits based on these counts
+    d1_ends = np.split(d1_splits, np.cumsum(counts))
+
+    return d1_ends
+
+
+def run_duplex_finder_error_correction(
+    duplex_to_particle: dict, particle_to_duplex: dict, nucleotides_in_duplex, positions, path_to_hb_file
+    ):
+    """Runs error correction for the duplex finder by handling edge cases and non-bonded fixes.
+
+    Args:
+        duplex_to_particle (dict): Mapping from duplexes to particles.
+        particle_to_duplex (dict): Mapping from particles to duplexes.
+        nucleotides_in_duplex: Information about nucleotides in each duplex.
+        positions (np.array): Positions of particles.
+        path_to_hb_file (str): Path to the hydrogen bond information file.
 
     Returns:
-    - Updated duplex_to_particle mapping and a list of all edge cases.
+        Updated duplex_to_particle mapping and a list of all edge cases.
     """
     all_edge_cases, len_one_parts = get_nuc_not_included_in_d_to_p(particle_to_duplex, nucleotides_in_duplex)
 
@@ -204,7 +292,7 @@ def run_duplex_finder_error_correction(duplex_to_particle, particle_to_duplex, n
     if all_edge_cases:
         duplex_to_particle, fixed = fully_complementary_sequential_fix(nucleotides_in_duplex, positions, all_edge_cases, duplex_to_particle)
         if fixed:
-            values_to_remove = sum(fixed, [])
+            values_to_remove = [ele for sublist in fixed for item in sublist for ele in item]
             all_edge_cases = [[val for val in sublist if val not in values_to_remove] for sublist in all_edge_cases]
             all_edge_cases = [sublist for sublist in all_edge_cases if sublist]   
         
@@ -218,7 +306,7 @@ def run_duplex_finder_error_correction(duplex_to_particle, particle_to_duplex, n
             all_edge_cases = [sublist for sublist in all_edge_cases if sublist]
 
     if all_edge_cases:
-        print('Unable to assign all nucleotides to duplexes. Continuing with the ones that were assigned. Nucleotides not assigned to duplexes are:\n', all_edge_cases)
+        print('\nUnable to assign all nucleotides to duplexes, continuing with the ones that were assigned. Unassigned nucleotides:\n', all_edge_cases,'\n')
     
     return duplex_to_particle, all_edge_cases
 
@@ -353,6 +441,7 @@ def full_sequential_group_distance_check(positions, sequential_parts):
 
 
 def fully_complementary_sequential_fix(nucleotides_in_duplex, positions, all_edge_cases, duplex_to_particle):
+    all_edge_cases = [sublist for sublist in all_edge_cases if len(sublist) > 1]
     pair_set, indexes, nearest_edge_case_min = full_sequential_group_distance_check(positions, all_edge_cases)
 
     easy_fix = []
@@ -387,108 +476,14 @@ def non_bonded_fixes(path_to_hb_info_file, all_edge_cases, duplex_to_particle):
     hb_edge_cases_idx = [edge_case for edge_case, boolean in zip(all_edge_cases, new_boolean_criteria) if boolean >= 0.3]
     
     for case in hb_edge_cases_idx:
+        if len(case) > 1:
             new_key = len(duplex_to_particle) + 1
             duplex_to_particle[int(new_key)] = [case]
-            
+
             fixed.append(case)
     
         
     return duplex_to_particle, fixed
-
-
-def fully_complementary_sequential_fixs(nucleotides_in_duplex, positions, all_edge_cases, duplex_to_particle, path_to_hb_info_file):
-    pair_set, indexes, nearest_edge_case_min = full_sequential_group_distance_check(positions, all_edge_cases)
-    nuc_dict = {'A':'T', 'T':'A', 'C':'G', 'G':'C'}
-    easy_fix = []
-    alignments1 = []
-    alignments2 = []
-    monomer_info = np.array(nucleotides_in_duplex)
-    
-    hb_energy = read_hb_energy_file(path_to_hb_info_file)
-    hb_energy = np.array(hb_energy['HB (oxDNA su)'])
-    for idxes in indexes:
-        idx_1 = idxes[0]
-        idx_2 = idxes[1]
-
-        monomers_1 = monomer_info[idx_1]
-        monomers_1 = ''.join([mono.btype for mono in monomers_1])
-
-        monomers_2 = monomer_info[idx_2]
-        monomers_2 = ''.join([nuc_dict[mono.btype] for mono in monomers_2][::-1])
-        
-        alignment1, alignment2, seq_1_indexs, seq_2_indexs = smith_waterman(monomers_1, monomers_2)
-        
-        # if len(seq_1_indexs) > 1:
-        # print(seq_1_indexs, seq_2_indexs)
-        # print(idx_1, idx_2)
-        print(alignment1)
-        print(monomers_1, monomers_2)
-        
-        aligned_idxes_1 = [idx_1[i] for i in seq_1_indexs]
-        aligned_idxes_2 = [idx_2[i] for i in seq_2_indexs]
-        
-        energies_1 = hb_energy[aligned_idxes_1]
-        energies_2 = hb_energy[aligned_idxes_2]
-        print(aligned_idxes_1, aligned_idxes_2)
-        print(energies_1, energies_2)
-        
-        # new_key = len(duplex_to_particle) + 1
-        # duplex_to_particle[int(new_key)] = [aligned_idxes_1, aligned_idxes_2[::-1]]
-        # easy_fix.append([aligned_idxes_1, aligned_idxes_2[::-1]])
-
-
-    return duplex_to_particle, easy_fix
-
-
-
-def smith_waterman(seq1, seq2, match_score=1, mismatch_penalty=-1, gap_penalty=-2):
-    # Initialize the matrix
-    m, n = len(seq1), len(seq2)
-    score_matrix = np.zeros((m+1, n+1))
-
-    # Fill the matrix
-    for i in range(1, m + 1):
-        for j in range(1, n + 1):
-            if seq1[i-1] == seq2[j-1]:
-                diag_score = score_matrix[i-1][j-1] + match_score
-            else:
-                diag_score = score_matrix[i-1][j-1] + mismatch_penalty
-
-            score_matrix[i][j] = max(
-                0,
-                diag_score,
-                score_matrix[i-1][j] + gap_penalty,
-                score_matrix[i][j-1] + gap_penalty
-            )
-
-    # Trace back from the highest scoring cell
-    alignment1, alignment2 = '', ''
-    i, j = np.unravel_index(np.argmax(score_matrix), score_matrix.shape)
-    seq_1_indexs = []
-    seq_2_indexs = []
-
-    while score_matrix[i][j] > 0:
-        if i > 0 and score_matrix[i][j] == score_matrix[i-1][j] + gap_penalty:
-            alignment1 = seq1[i-1] + alignment1
-            alignment2 = '-' + alignment2
-            seq_1_indexs.append(i-1)
-            i -= 1
-        elif j > 0 and score_matrix[i][j] == score_matrix[i][j-1] + gap_penalty:
-            alignment1 = '-' + alignment1
-            alignment2 = seq2[j-1] + alignment2
-            seq_2_indexs.append(j-1)
-            j -= 1
-        else:
-            alignment1 = seq1[i-1] + alignment1
-            alignment2 = seq2[j-1] + alignment2
-            seq_1_indexs.append(i-1)
-            seq_2_indexs.append(j-1)
-            i -= 1
-            j -= 1
-    seq_1_indexs = seq_1_indexs[::-1]
-    seq_2_indexs = seq_2_indexs[::-1]
-    
-    return alignment1, alignment2, seq_1_indexs, seq_2_indexs
 
 
 def create_coarse_particle_info(d_to_p, positions, particles_per_course_bead, nucleotides_in_duplex, remainder_modifer=0.25):
@@ -526,8 +521,9 @@ def create_coarse_particle_info(d_to_p, positions, particles_per_course_bead, nu
                     nucleotide_types = ''.join([nucleotides_in_duplex[idx].btype for idx in particle_indices])
                     coarse_nucleotides.append(nucleotide_types)
                     
-                    strand_ids = stats.mode([nucleotides_in_duplex[idx].strand.id for idx in particle_indices], keepdims=False)[0]
+                    strand_ids = Counter([nucleotides_in_duplex[idx].strand.id for idx in particle_indices]).most_common(1)[0][0]
                     course_strands.append(strand_ids)
+                    
                     
                 elif len(particle_indices) <= remainder_modifer:
                     course_indexes[-1].extend(particle_indices)
@@ -541,7 +537,7 @@ def create_coarse_particle_info(d_to_p, positions, particles_per_course_bead, nu
                     center_of_mass = np.mean(positions[particle_indices], axis=0)
                     coarse_positions[-1] = center_of_mass
                     
-                    strand_ids = stats.mode([nucleotides_in_duplex[idx].strand.id for idx in particle_indices], keepdims=False)[0]
+                    strand_ids = Counter([nucleotides_in_duplex[idx].strand.id for idx in particle_indices]).most_common(1)[0][0]
                     course_strands[-1] = (strand_ids)
                 else:
                     print(f'Error: Something went wrong with the coarse-graining process. Duplex idx: {duplex}')
@@ -553,35 +549,51 @@ def create_coarse_particle_info(d_to_p, positions, particles_per_course_bead, nu
             coarse_particles_nucleotides[key] = coarse_nucleotides
             coarse_particle_indexes[key] = course_indexes
             course_particle_strands[key] = course_strands
-    
     return coarse_particles_positions, coarse_particles_nucleotides, coarse_particle_indexes, course_particle_strands
 
 
-def write_course_particle_files_functional(coarse_particles_nucleotides, coarse_particles_positions, coarse_particle_indexes, course_particle_strands, system_name, particles_per_course_bead, material):
+def write_course_particle_files_functional(
+    coarse_particles_nucleotides, coarse_particles_positions,
+    coarse_particle_indexes, course_particle_strands,
+    system_name, particles_per_course_bead,
+    material, ox_conf, force_stiff):
+    
+    # Write the nucleotide sequence to a file with one strand being in 3` to 5` order and the other being in 5` to 3` order for visual inspection
     write_sanity_check(coarse_particles_nucleotides, system_name)
     
+    # Find the order to call the keys in the course_particle dictionaries to place beads in sequential order
     keys_ordered_acending, indexes_ordered_acending = order_indexes_and_keys_acending(coarse_particle_indexes)
     
-    coarse_particles_nucleotides_ordered = write_course_particle_nucleotides(coarse_particles_nucleotides, coarse_particle_indexes, keys_ordered_acending, system_name, particles_per_course_bead)
-    coarse_particles_positions_ordered = write_course_particles_positions(coarse_particles_positions, keys_ordered_acending, system_name, particles_per_course_bead)
-    bead_pair_dict, coarse_particle_indexes_ordered = write_course_particle_bonded_pairs(coarse_particle_indexes, coarse_particles_nucleotides_ordered, indexes_ordered_acending, system_name, particles_per_course_bead)
-    strand_list = write_strand_info(course_particle_strands, coarse_particles_nucleotides, keys_ordered_acending, system_name, particles_per_course_bead, material)
+    # Write the nucleotide sequence of each course bead with the cooresponding course particle index in 5` to 3` order
+    coarse_particles_nucleotides_ordered = write_course_particle_nucleotides(
+        coarse_particles_nucleotides, coarse_particle_indexes, keys_ordered_acending, system_name, particles_per_course_bead)
     
+    # Write the list of bonded course particles
+    bead_pair_dict, coarse_particle_indexes_ordered = write_course_particle_bonded_pairs(
+        coarse_particle_indexes, coarse_particles_nucleotides_ordered, indexes_ordered_acending, system_name, particles_per_course_bead, course_particle_strands)
+    
+    # Write the course-grained conformation position and direction info to .dat file
+    coarse_particles_positions_ordered = write_course_particles_positions(
+        coarse_particles_positions, keys_ordered_acending, system_name, particles_per_course_bead, indexes_ordered_acending, ox_conf)
+    
+    # Write the annamo topology and interaction matrix files
+    strand_list = write_strand_info(
+        course_particle_strands, coarse_particles_nucleotides, keys_ordered_acending, system_name, particles_per_course_bead, material)
+    
+    write_course_top_for_visualization(
+        coarse_particles_nucleotides_ordered, bead_pair_dict, course_particle_strands, particles_per_course_bead, system_name, material, keys_ordered_acending)
+    
+    write_mutual_trap_file(particles_per_course_bead, system_name, bead_pair_dict, force_stiff)
+        
     return coarse_particles_nucleotides_ordered, coarse_particles_positions_ordered, bead_pair_dict, coarse_particle_indexes_ordered, strand_list
 
 
 def order_indexes_and_keys_acending(coarse_particle_indexes):
-    indexes_ordered_acending = []
-    for values in coarse_particle_indexes.values():
-        indexes_ordered_acending.append(sorted(values))
-    indexes_ordered_acending.sort()
-    
-    keys_ordered_acending = []
-    for lists in indexes_ordered_acending:
-        for keys, values in coarse_particle_indexes.items():
-            values = sorted(values)
-            if lists == values:
-                keys_ordered_acending.append(keys)
+    sorted_values_keys = sorted(
+        [(sorted(values), key) for key, values in coarse_particle_indexes.items()]
+    )
+    indexes_ordered_acending = [item[0] for item in sorted_values_keys]
+    keys_ordered_acending = [item[1] for item in sorted_values_keys]
                 
     return keys_ordered_acending, indexes_ordered_acending
 
@@ -670,7 +682,20 @@ def write_course_particle_nucleotides(coarse_particles_nucleotides, coarse_parti
 
     return coarse_particles_nucleotides_ordered
 
-def write_course_particles_positions(coarse_particles_positions, keys_ordered_acending, system_name, particles_per_course_bead):
+
+def compute_course_a1_a3_vectors(ox_conf, indexes_ordered_acending):
+    flat_indexes = [item for sublist in indexes_ordered_acending for item in sublist][::-1]
+    
+    a1s_in_beads = [ox_conf.a1s[idx] for idx in flat_indexes]
+    a3s_in_beads = [ox_conf.a3s[idx] for idx in flat_indexes]
+    
+    course_a1s = [np.mean(a1, axis=0) for a1 in a1s_in_beads]
+    course_a3s = [np.mean(a3, axis=0) for a3 in a3s_in_beads]
+    
+    return course_a1s, course_a3s
+    
+
+def write_course_particles_positions(coarse_particles_positions, keys_ordered_acending, system_name, particles_per_course_bead, indexes_ordered_acending, ox_conf):
     ordered_positions = deepcopy(coarse_particles_positions)    
     
     course_keys = list(coarse_particles_positions.keys())
@@ -679,26 +704,47 @@ def write_course_particles_positions(coarse_particles_positions, keys_ordered_ac
     for idx in range(num_course_duplex):
         ordered_positions[(idx+1,1)] = coarse_particles_positions[(idx+1,1)][::-1]
 
-
     # I think this will correctly order the postions in 5` to 3` order, however I need to test it but am yet to create a means to test it.
     coarse_particles_positions_ordered = [ordered_positions[order][::-1] for order in keys_ordered_acending]    
     coarse_particles_positions_ordered = coarse_particles_positions_ordered[::-1] # Reverse the order of the groups to put them back in 5` to 3` order
     
+    course_a1s, course_a3s = compute_course_a1_a3_vectors(ox_conf, indexes_ordered_acending)
+    flat_course_particles_positions_ordered = [item for sublist in coarse_particles_positions_ordered for item in sublist]
+    
+    with open(f'{system_name}_{particles_per_course_bead}_nuc_beads_positions.dat', 'w') as file:
+        file.write("t = 0\n")
+        file.write(f"b = {ox_conf.box[0]} {ox_conf.box[1]} {ox_conf.box[2]}\n")
+        file.write(f"E = 0 0 0\n")
+        
+        for position, a1, a3 in zip(flat_course_particles_positions_ordered, course_a1s, course_a3s):
+            # Write x, y, z, a1_x, ..., a3_x, ..., vel_x, ..., angular_vel_x, ..., angular_vel_z separated by spaces
+            file.write(f"{position[0]} {position[1]} {position[2]} {a1[0]} {a1[1]} {a1[2]} {a3[0]} {a3[1]} {a3[2]} 0 0 0 0 0 0\n")
+            
     with open(f'{system_name}_{particles_per_course_bead}_nuc_beads_positions.xyz', 'w') as file:
-        for bead_positions in coarse_particles_positions_ordered:
-            for position in bead_positions:
-                # Write x, y, z positions separated by spaces
-                file.write(f"{position[0]} {position[1]} {position[2]}\n")
+        for position in flat_course_particles_positions_ordered:
+            # Write x, y, z positions separated by spaces
+            file.write(f"{position[0]} {position[1]} {position[2]}\n")
     
     return coarse_particles_positions_ordered
 
 
-def write_course_particle_bonded_pairs(coarse_particle_indexes, coarse_particles_nucleotides_ordered, indexes_ordered_acending, system_name, particles_per_course_bead):
+def write_course_particle_bonded_pairs(
+    coarse_particle_indexes, coarse_particles_nucleotides_ordered, indexes_ordered_acending, system_name, particles_per_course_bead, course_particle_strands
+    ):
     ordered_indexes = deepcopy(coarse_particle_indexes)
     
     course_keys = list(coarse_particle_indexes.keys())
     num_course_duplex = len([key for key in course_keys if key[1] == 1])
+    
+    # paired_indexes = {k:v for idx,(k,v) in enumerate(ordered_indexes.items()) if idx < num_course_duplex*2}
+    # particles_idx_pairs = []
+    # for (n, _), paired_lists in paired_indexes.items():
+    #     for k in range(len(paired_lists)):  # Assuming both lists in each pair are of the same length
 
+    #         pair = (paired_indexes[(n, 0)][k], paired_indexes[(n, 1)][k])
+    #         particles_idx_pairs.append(pair)
+
+    # print('here')
     ordered_indexes_values = list(ordered_indexes.values())
     particles_idx_pair_dict = {}
     i = 0
@@ -727,12 +773,10 @@ def write_course_particle_bonded_pairs(coarse_particle_indexes, coarse_particles
             indexes_acending.append(embedded_list)
     
     
-    ordered_indexes = {f'{key}':ind for key,ind in enumerate(indexes_acending)}
+    ordered_indexes_acending = {f'{key}':ind for key,ind in enumerate(indexes_acending)}
     
-    dict_keys = list(ordered_indexes.keys())
-    dict_values = list(ordered_indexes.values())
+    dict_values = list(ordered_indexes_acending.values())
     dict_values = dict_values[::-1] # Reverse the order of the groups to put them back in 5` to 3` order
-    # print(ordered_indexes)
     
     course_bead_idx_pair_dict = {}
     i = 0
@@ -743,6 +787,8 @@ def write_course_particle_bonded_pairs(coarse_particle_indexes, coarse_particles
             course_bead_idx_pair_dict[i] = (dict_values.index(beads[0]),)
         i +=1
     
+    course_bead_idx_pair_dict = dict(sorted(course_bead_idx_pair_dict.items(), key=lambda item: item[1][0]))
+    
     nucs = [item for sublist in coarse_particles_nucleotides_ordered for item in sublist]
     
     with open(f'{system_name}_{particles_per_course_bead}_nuc_beads_bonds.txt', 'w') as f:
@@ -751,8 +797,87 @@ def write_course_particle_bonded_pairs(coarse_particle_indexes, coarse_particles
                 f.write(f'({value[0]}, {value[1]}): {nucs[value[0]]} {nucs[value[1]]}\n')
             except:
                 f.write(f'({value[0]}): {nucs[value[0]]}\n')
-            
+    
     return course_bead_idx_pair_dict, ordered_indexes
+
+
+def write_course_top_for_visualization(
+    coarse_particles_nucleotides_ordered, course_bead_idx_pair_dict, course_particle_strands, particles_per_course_bead, system_name, material, keys_ordered_acending
+    ):
+    ordered_course_particle_strands = []
+    for key in keys_ordered_acending:
+        ordered_course_particle_strands.append(course_particle_strands[key])
+        
+    bead_strand = [item for sublist in ordered_course_particle_strands for item in sublist]
+    new_bead_strand = swap_counts(bead_strand)
+    unqiue_strands = set(new_bead_strand)
+    n_unqiue_strands = len(unqiue_strands)
+    
+    pair_dict_for_top = {}
+    for key, value in course_bead_idx_pair_dict.items():
+        if len(value) > 1:
+            pair_dict_for_top[value[0]] = True
+            pair_dict_for_top[value[1]] = False
+        else:
+            pair_dict_for_top[value[0]] = True
+
+    nucs = [item for sublist in coarse_particles_nucleotides_ordered for item in sublist]
+    pair_dict_for_top = dict(sorted(pair_dict_for_top.items()))
+    nucs_for_top = [nucs[idx][0] if pair_bool else nucs[idx][-1] for idx, pair_bool in pair_dict_for_top.items()] 
+    
+    nuc_to_strand = {strand_idx:[] for strand_idx in unqiue_strands}
+    for strand_idx, nuc in zip(new_bead_strand, nucs_for_top):
+        nuc_to_strand[strand_idx].append(nuc)
+    
+    with open(f'{system_name}_{particles_per_course_bead}_visualization.top', 'w') as f:
+        f.write(f'{len(nucs_for_top)} {n_unqiue_strands} 5->3\n')
+        for nuc_strand, nucleotides in nuc_to_strand.items():
+            f.write(f'{"".join(nucleotides)} id={nuc_strand} type={material} circular=false\n')
+        
+    return None
+
+def swap_counts(nums):
+    # Get the unique integers and their counts
+    unique_ints = sorted(set(nums))
+    counts = [nums.count(num) for num in unique_ints]
+
+    # Build the new list with swapped counts
+    new_nums = []
+    for i in range(len(unique_ints)):
+        new_nums.extend([unique_ints[i]] * counts[-(i + 1)])
+
+    return new_nums
+
+
+def write_mutual_trap_file(particles_per_course_bead, system_name, course_bead_idx_pair_dict, force_stiff):
+    
+    with open(f'{system_name}_{particles_per_course_bead}_force.txt', 'w') as f:
+        for value in course_bead_idx_pair_dict.values():
+            if len(value) > 1:
+                f.write('{\n')
+                f.write('    type = mutual_trap\n')
+                f.write(f'    particle = {value[0]}\n')
+                f.write(f'    ref_particle = {value[1]}\n')
+                f.write(f'    stiff = {force_stiff}\n')
+                f.write('    r0 = 1.2\n')
+                f.write('    PBC = 1\n')
+                f.write('}\n')
+                f.write('\n')
+                
+                f.write('{\n')
+                f.write('    type = mutual_trap\n')
+                f.write(f'    particle = {value[1]}\n')
+                f.write(f'    ref_particle = {value[0]}\n')
+                f.write(f'    stiff = {force_stiff}\n')
+                f.write('    r0 = 1.2\n')
+                f.write('    PBC = 1\n')
+                f.write('}\n')
+                f.write('\n')
+                
+                
+            
+    return None
+    
 
 
 def write_sanity_check(coarse_particles_nucleotides, system_name):
@@ -918,6 +1043,7 @@ def initiation_contrib(i, j, x_idx):
     else:
         return 0, 0
 
+
 def check_terminal(tris, i, j, x_idx):
     i_is_initial = i in [e+1 for e in x_idx]
     j_is_final = j in [e-1 for e in x_idx]
@@ -999,171 +1125,96 @@ def check_material(beads_sequences, material):
 #### Depreciated functions #############################
 ########################################################
   
-def write_course_particle_files(coarse_particles_nucleotides, coarse_particles_positions, coarse_particle_indexes, system_name):
-    sanity_check = deepcopy(coarse_particles_nucleotides)
-
-    indexes_ordered_acending = []
-    for values in coarse_particle_indexes.values():
-        indexes_ordered_acending.append(values)
-    indexes_ordered_acending.sort()
-    
-    keys_ordered_acending = []
-    for lists in indexes_ordered_acending:
-        for keys, values in coarse_particle_indexes.items():
-            if lists == values:
-                keys_ordered_acending.append(keys)
-                
-    for idx in range(int(len(coarse_particles_nucleotides)/2)):
-        for lists in range(len(coarse_particles_nucleotides[(idx+1,1)])):
-            coarse_particles_nucleotides[(idx+1,1)][lists] = coarse_particles_nucleotides[(idx+1,1)][lists][::-1]
-
-    for idx in range(int(len(coarse_particles_nucleotides)/2)):
-        coarse_particles_nucleotides[(idx+1,1)] = coarse_particles_nucleotides[(idx+1,1)][::-1]
-
-    coarse_particles_nucleotides_ordered = [coarse_particles_nucleotides[order] for order in keys_ordered_acending]
-
-    for idx in range(int(len(coarse_particles_positions)/2)):
-        for lists in range(len(coarse_particles_positions[(idx+1,1)])):
-            coarse_particles_positions[(idx+1,1)][lists] = coarse_particles_positions[(idx+1,1)][lists][::-1]
-
-    for idx in range(int(len(coarse_particles_positions)/2)):
-        coarse_particles_positions[(idx+1,1)] = coarse_particles_positions[(idx+1,1)][::-1]
-
-    coarse_particles_positions_ordered = [coarse_particles_positions[order] for order in keys_ordered_acending]
-
-    nuc_beads_dic = []
-    for lists in coarse_particles_nucleotides_ordered:
-        for string in lists:
-            nuc_beads_dic.append(string)
-
-
-    nuc_beads_dic = {f'{key}':string for key, string in enumerate(nuc_beads_dic)}
-
-    with open(f'{system_name}_4_nuc_beads_sequence.txt', 'w') as f:
-        for key, value in nuc_beads_dic.items():
-            f.write(f'{key} {value}\n')
-
-    with open(f'{system_name}_coarse_particles_positions.xyz', 'w') as file:
-        for bead_positions in coarse_particles_positions_ordered:
-            for position in bead_positions:
-                # Write x, y, z positions separated by spaces
-                file.write(f"{position[0]} {position[1]} {position[2]}\n")
-
-    sanity_check = {f'{key}':value for key, value in sanity_check.items()}
-    stringify = js.dumps(sanity_check)
-    stringify = stringify.split(', "(')
-    stringify = ',\n "('.join(stringify)
-    with open(f'{system_name}_sanity_check.json', 'w') as f:
-        f.write(stringify)
-        
-    for idx in range(int(len(coarse_particle_indexes)/2)):
-        for lists in range(len(coarse_particle_indexes[(idx+1,1)])):
-            coarse_particle_indexes[(idx+1,1)][lists] = coarse_particle_indexes[(idx+1,1)][lists][::-1]
-            
-    for idx in range(int(len(coarse_particle_indexes)/2)):
-        coarse_particle_indexes[(idx+1,1)] = coarse_particle_indexes[(idx+1,1)][::-1]
-    
-    pair_dict = {}
-    i = 0
-    for (s, values) in list(coarse_particle_indexes.items())[::2]:
-        for bead in values:
-            pair_dict[i] = [bead]
-            i += 1
-            
-    i = 0
-    for (s, values) in list(coarse_particle_indexes.items())[1::2]:
-        for bead in values:
-            pair_dict[i].append(bead)
-            i += 1
-    
-    ordered_indexes = []
-    for lists in indexes_ordered_acending:
-        for embedded_list in lists:
-            ordered_indexes.append(embedded_list)
-            
-    ordered_indexes = {f'{key}':ind for key,ind in enumerate(ordered_indexes)}
-    
-    dict_keys = list(ordered_indexes.keys())
-    dict_values = list(ordered_indexes.values())
-    
-    nuc_beads_dic = []
-    for lists in coarse_particles_nucleotides_ordered:
-        for string in lists:
-            nuc_beads_dic.append(string)
-            
-    bead_pair_dict = {}
-    i = 0
-    for beads in pair_dict.values():
-        bead_pair_dict[i] = (dict_values.index(beads[0]), dict_values.index(beads[1]))
-        i +=1
-        
-    with open(f'{system_name}_4_nuc_beads_bonds.txt', 'w') as f:
-        for key, value in bead_pair_dict.items():
-            f.write(f'{value[0]} {value[1]}\n')
-
-    return None
-
-
-@contextmanager
-def suppress_output():
-    """A context manager that redirects stdout and stderr to devnull"""
-    with open(os.devnull, 'w') as fnull:
-        # Backup the original stdout and stderr
-        old_stdout, old_stderr = sys.stdout, sys.stderr
-        try:
-            # Redirect both stdout and stderr to devnull
-            sys.stdout, sys.stderr = fnull, fnull
-            yield
-        finally:
-            # Restore stdout and stderr to their original values
-            sys.stdout, sys.stderr = old_stdout, old_stderr
-
-        
-        
-        
-def fully_complementary_sequential_fix(nucleotides_in_duplex, positions, all_edge_cases, duplex_to_particle):
+def fully_complementary_sequential_fixs(nucleotides_in_duplex, positions, all_edge_cases, duplex_to_particle, path_to_hb_info_file):
     pair_set, indexes, nearest_edge_case_min = full_sequential_group_distance_check(positions, all_edge_cases)
-
+    nuc_dict = {'A':'T', 'T':'A', 'C':'G', 'G':'C'}
     easy_fix = []
+    alignments1 = []
+    alignments2 = []
     monomer_info = np.array(nucleotides_in_duplex)
+    
+    hb_energy = read_hb_energy_file(path_to_hb_info_file)
+    hb_energy = np.array(hb_energy['HB (oxDNA su)'])
     for idxes in indexes:
-        nuc_dict = {'A':'T', 'T':'A', 'C':'G', 'G':'C'}
         idx_1 = idxes[0]
         idx_2 = idxes[1]
 
         monomers_1 = monomer_info[idx_1]
-        monomers_1 = [mono.btype for mono in monomers_1]
+        monomers_1 = ''.join([mono.btype for mono in monomers_1])
 
         monomers_2 = monomer_info[idx_2]
-        monomers_2 = [nuc_dict[mono.btype] for mono in monomers_2][::-1]
-
-        if monomers_1 == monomers_2:
-            new_key = len(duplex_to_particle) + 1
-            duplex_to_particle[int(new_key)] = [idxes[0], idxes[1][::-1]]
-            easy_fix.append([idxes[0], idxes[1][::-1]])
-            
-
-    # for key, value in duplex_to_particle.items():
-    #     print(value)
-    #     ends = value[0][-1]
-    #     starts = value[0][0]
-    #     for pairs in  easy_fix:
-    #         look_0 = pairs[0][0] - 1
-    #         look_1 = pairs[0][0] + 1
-    #         if ends == look_0:
-    #             key_int = int(key) +1
-    #             key_mapping_base = {str(key):(key) for key in range(key_int +1)}
-    #             key_mapping_update = {str(key):str(key+1) for key in range(key_int, len(duplex_to_particle) +1)}
-    #             key_mapping_base.update(key_mapping_update) 
-
-    #             old_duplex = {key_mapping_base.get(str(key), str(key)): value for key, value in duplex_to_particle.items() if int(key) >= key_int}
-
-    #             duplex_to_particle = {key_mapping_base.get(str(key), str(key)): value for key, value in duplex_to_particle.items() if int(key) < key_int}
-    #             duplex_to_particle[str(key_int)] = pairs
-    #             duplex_to_particle.update(old_duplex)
-    #             print(pairs)
-
+        monomers_2 = ''.join([nuc_dict[mono.btype] for mono in monomers_2][::-1])
         
-    # easy_fix = np.concatenate(np.concatenate(np.array(easy_fix, dtype="object")))
-    
+        alignment1, alignment2, seq_1_indexs, seq_2_indexs = smith_waterman(monomers_1, monomers_2)
+        
+        # if len(seq_1_indexs) > 1:
+        # print(seq_1_indexs, seq_2_indexs)
+        # print(idx_1, idx_2)
+        print(alignment1)
+        print(monomers_1, monomers_2)
+        
+        aligned_idxes_1 = [idx_1[i] for i in seq_1_indexs]
+        aligned_idxes_2 = [idx_2[i] for i in seq_2_indexs]
+        
+        energies_1 = hb_energy[aligned_idxes_1]
+        energies_2 = hb_energy[aligned_idxes_2]
+        print(aligned_idxes_1, aligned_idxes_2)
+        print(energies_1, energies_2)
+        
+        # new_key = len(duplex_to_particle) + 1
+        # duplex_to_particle[int(new_key)] = [aligned_idxes_1, aligned_idxes_2[::-1]]
+        # easy_fix.append([aligned_idxes_1, aligned_idxes_2[::-1]])
+
+
     return duplex_to_particle, easy_fix
+
+
+
+def smith_waterman(seq1, seq2, match_score=1, mismatch_penalty=-1, gap_penalty=-2):
+    # Initialize the matrix
+    m, n = len(seq1), len(seq2)
+    score_matrix = np.zeros((m+1, n+1))
+
+    # Fill the matrix
+    for i in range(1, m + 1):
+        for j in range(1, n + 1):
+            if seq1[i-1] == seq2[j-1]:
+                diag_score = score_matrix[i-1][j-1] + match_score
+            else:
+                diag_score = score_matrix[i-1][j-1] + mismatch_penalty
+
+            score_matrix[i][j] = max(
+                0,
+                diag_score,
+                score_matrix[i-1][j] + gap_penalty,
+                score_matrix[i][j-1] + gap_penalty
+            )
+
+    # Trace back from the highest scoring cell
+    alignment1, alignment2 = '', ''
+    i, j = np.unravel_index(np.argmax(score_matrix), score_matrix.shape)
+    seq_1_indexs = []
+    seq_2_indexs = []
+
+    while score_matrix[i][j] > 0:
+        if i > 0 and score_matrix[i][j] == score_matrix[i-1][j] + gap_penalty:
+            alignment1 = seq1[i-1] + alignment1
+            alignment2 = '-' + alignment2
+            seq_1_indexs.append(i-1)
+            i -= 1
+        elif j > 0 and score_matrix[i][j] == score_matrix[i][j-1] + gap_penalty:
+            alignment1 = '-' + alignment1
+            alignment2 = seq2[j-1] + alignment2
+            seq_2_indexs.append(j-1)
+            j -= 1
+        else:
+            alignment1 = seq1[i-1] + alignment1
+            alignment2 = seq2[j-1] + alignment2
+            seq_1_indexs.append(i-1)
+            seq_2_indexs.append(j-1)
+            i -= 1
+            j -= 1
+    seq_1_indexs = seq_1_indexs[::-1]
+    seq_2_indexs = seq_2_indexs[::-1]
+    
+    return alignment1, alignment2, seq_1_indexs, seq_2_indexs
